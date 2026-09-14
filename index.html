@@ -457,12 +457,14 @@
     </div>
     <div class="set__group">
       <div class="set__label">AI 스튜디오</div>
-      <input class="field" type="password" id="apiKeyInput" placeholder="Claude API 키 (sk-ant-…)" autocomplete="off" spellcheck="false" />
+      <div class="seg" id="apiProviderSeg"><button class="on" type="button" data-provider="claude">Claude</button><button type="button" data-provider="gemini">Gemini · 무료</button></div>
+      <input class="field" type="password" id="apiKeyInput" placeholder="선택한 곳의 API 키를 붙여넣으세요" autocomplete="off" spellcheck="false" />
+      <p class="keynote"><a id="apiKeyIssue" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">키 발급받기 →</a></p>
       <div class="keyrow">
         <button class="btn" type="button" id="apiKeyVerify">키 확인</button>
         <button class="btn btn--ghost" type="button" id="apiKeyClear">삭제</button>
       </div>
-      <p class="keynote" id="apiKeyStatus">본인의 Claude API 키를 직접 넣어야 AI 연출 기능이 동작합니다. 키는 이 브라우저의 localStorage에만 저장되고 api.anthropic.com으로만 전송되며, 서버에는 보관되지 않습니다. 사용량은 본인 계정에 과금되니 공용 PC에서는 쓰고 나서 '삭제'를 눌러 주세요.</p>
+      <p class="keynote" id="apiKeyStatus">AI 연출을 쓰려면 본인 API 키가 필요합니다. 무료로 시작하려면 Gemini를 고르세요.</p>
       <button class="btn" type="button" id="openCuration2">컬렉션 관리</button>
     </div>
     <div class="set__group">
@@ -1475,19 +1477,94 @@
     var D = A.data, FLAGS = A.flags || {};
     if (!D) return;
 
-    /* ---------- Claude API constants ---------- */
-    var API_MODEL = "claude-opus-4-8";
-    var API_VERSION = "2023-06-01";
-    var API_URL = "https://api.anthropic.com/v1/messages";
-    var API_COUNT_URL = "https://api.anthropic.com/v1/messages/count_tokens";
-    function hdrs(key) {
+    /* ---------- LLM 제공자 (방문자 본인 키로 브라우저에서 직접 호출) ----------
+       SYSTEM_PROMPT·STAGING_SCHEMA·mkErr은 아래에서 정의되지만, 여기 함수들은
+       호출 시점에 평가되므로 같은 스코프의 var 호이스팅으로 안전하다. */
+    var CLAUDE_MODEL = "claude-opus-4-8";
+    var GEMINI_MODEL = "gemini-3.8-flash";
+    function claudeHdrs(key) {
       return {
         "content-type": "application/json",
         "x-api-key": key,
-        "anthropic-version": API_VERSION,
+        "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true"
       };
     }
+    var PROVIDERS = {
+      claude: {
+        label: "Claude",
+        chip: "Claude 연결됨",
+        hint: "Claude API 키 (sk-ant-…)",
+        issue: "https://console.anthropic.com/settings/keys",
+        issueText: "Anthropic 콘솔에서 키 발급받기 →",
+        store: "poems.apiKey",
+        note: "Anthropic 콘솔에서 발급한 본인 키가 필요합니다(무료 한도 없음, 선불 크레딧). 키는 이 브라우저의 localStorage에만 저장되고 api.anthropic.com으로만 전송되며, 서버에는 보관되지 않습니다. 사용량은 본인 계정에 과금되니 공용 PC에서는 쓰고 나서 '삭제'를 눌러 주세요.",
+        verify: function (k) {
+          return fetch("https://api.anthropic.com/v1/messages/count_tokens", {
+            method: "POST", headers: claudeHdrs(k),
+            body: JSON.stringify({ model: CLAUDE_MODEL, messages: [{ role: "user", content: "ping" }] })
+          });
+        },
+        request: function (k, userMsg) {
+          return fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST", headers: claudeHdrs(k),
+            body: JSON.stringify({
+              model: CLAUDE_MODEL, max_tokens: 8000,
+              thinking: { type: "adaptive" },
+              output_config: { format: { type: "json_schema", schema: STAGING_SCHEMA } },
+              system: SYSTEM_PROMPT,
+              messages: [{ role: "user", content: userMsg }]
+            })
+          });
+        },
+        text: function (j) {
+          if (j.stop_reason === "max_tokens") throw mkErr("응답이 잘렸습니다 — 다시 시도하세요.", "trunc");
+          if (j.stop_reason === "refusal") throw mkErr("모델이 이 요청을 거절했습니다.", "refusal");
+          var blk = (j.content || []).filter(function (b) { return b.type === "text"; })[0];
+          if (!blk) throw mkErr("빈 응답을 받았습니다.", "empty");
+          return blk.text;
+        }
+      },
+      gemini: {
+        label: "Gemini",
+        chip: "Gemini 연결됨",
+        hint: "Gemini API 키 (AIza…)",
+        issue: "https://aistudio.google.com/apikey",
+        issueText: "Google AI Studio에서 무료로 키 발급받기 →",
+        store: "poems.geminiKey",
+        note: "Google AI Studio(aistudio.google.com)에서 무료로 발급받는 키입니다. Flash 모델은 무료 한도 안에서 과금 없이 쓸 수 있고, 한도는 AI Studio에서 확인합니다. 키는 이 브라우저의 localStorage에만 저장되고 generativelanguage.googleapis.com으로만 전송되며, 서버에는 보관되지 않습니다. 공용 PC에서는 쓰고 나서 '삭제'를 눌러 주세요.",
+        verify: function (k) {
+          return fetch("https://generativelanguage.googleapis.com/v1beta/models", {
+            method: "GET", headers: { "x-goog-api-key": k }
+          });
+        },
+        request: function (k, userMsg) {
+          return fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-goog-api-key": k },
+            body: JSON.stringify({
+              model: GEMINI_MODEL,
+              system_instruction: SYSTEM_PROMPT,
+              input: userMsg,
+              response_format: { type: "text", mime_type: "application/json", schema: STAGING_SCHEMA }
+            })
+          });
+        },
+        text: function (j) {
+          var t = j.output_text;
+          if (!t && j.steps) {
+            t = j.steps.reduce(function (acc, step) {
+              return acc + (step.content || []).filter(function (b) { return b.type === "text"; })
+                .map(function (b) { return b.text; }).join("");
+            }, "");
+          }
+          if (!t) throw mkErr("빈 응답을 받았습니다.", "empty");
+          return t;
+        }
+      }
+    };
+    function getProvider() { return PROVIDERS[D.get("poems.provider", "claude")] ? D.get("poems.provider", "claude") : "claude"; }
+    function P() { return PROVIDERS[getProvider()]; }
 
     /* ---------- settings persistence (wires the once-dummy drawer) ---------- */
     var settings = D.get("poems.settings", {});
@@ -1517,35 +1594,47 @@
 
     /* ---------- API key management ---------- */
     var keyInput = $("#apiKeyInput"), keyStatus = $("#apiKeyStatus");
-    var KEY_NOTE = keyStatus.textContent;
-    function getKey() { return D.get("poems.apiKey", "") || ""; }
+    var providerSeg = $("#apiProviderSeg"), issueLink = $("#apiKeyIssue");
+    function getKey() { return D.get(P().store, "") || ""; }
     function syncKeyUI() {
-      var k = getKey();
+      var k = getKey(), pv = P();
       keyInput.value = "";
-      keyInput.placeholder = k ? "저장됨: " + k.slice(0, 12) + "…" + k.slice(-4) : "Claude API 키 (sk-ant-…)";
+      keyInput.placeholder = k ? "저장됨: " + k.slice(0, 8) + "…" + k.slice(-4) : pv.hint;
+      issueLink.href = pv.issue; issueLink.textContent = pv.issueText;
+      Array.prototype.forEach.call(providerSeg.children, function (b) {
+        b.classList.toggle("on", b.getAttribute("data-provider") === getProvider());
+      });
       syncModeChip();
     }
+    providerSeg.addEventListener("click", function (e) {
+      var b = e.target.closest("button"); if (!b) return;
+      D.set("poems.provider", b.getAttribute("data-provider"));
+      keyStatus.textContent = P().note;
+      syncKeyUI();
+    });
     keyInput.addEventListener("change", function () {
       var v = keyInput.value.trim();
       if (!v) return;
-      D.set("poems.apiKey", v);
+      D.set(P().store, v);
       keyStatus.textContent = "키가 저장되었습니다. '키 확인'으로 유효성을 검사하세요.";
       syncKeyUI();
     });
     $("#apiKeyVerify").addEventListener("click", function () {
-      var k = getKey(), btn = $("#apiKeyVerify");
+      var k = getKey(), pv = P(), btn = $("#apiKeyVerify");
       if (!k) { keyStatus.textContent = "저장된 키가 없습니다. 위 칸에 키를 입력하세요."; return; }
       btn.disabled = true; keyStatus.textContent = "확인 중…";
-      fetch(API_COUNT_URL, { method: "POST", headers: hdrs(k), body: JSON.stringify({ model: API_MODEL, messages: [{ role: "user", content: "ping" }] }) })
+      pv.verify(k)
         .then(function (r) {
-          keyStatus.textContent = r.ok ? "키 확인됨 — 스튜디오에서 Claude 연출을 쓸 수 있습니다."
-            : (r.status === 401 ? "키가 올바르지 않습니다 (401)." : "확인 실패 (HTTP " + r.status + ").");
+          keyStatus.textContent = r.ok ? "키 확인됨 — 스튜디오에서 " + pv.label + " 연출을 쓸 수 있습니다."
+            : (r.status === 401 || r.status === 403 || r.status === 400
+              ? "키가 올바르지 않습니다 (HTTP " + r.status + ")."
+              : "확인 실패 (HTTP " + r.status + ").");
         })
         .catch(function () { keyStatus.textContent = "네트워크 오류 — 인터넷 연결 또는 브라우저 차단을 확인하세요."; })
         .then(function () { btn.disabled = false; syncModeChip(); });
     });
     $("#apiKeyClear").addEventListener("click", function () {
-      D.del("poems.apiKey"); keyStatus.textContent = KEY_NOTE; syncKeyUI();
+      D.del(P().store); keyStatus.textContent = P().note; syncKeyUI();
     });
 
     /* ---------- studio state ---------- */
@@ -1601,11 +1690,11 @@
       setMode(b.getAttribute("data-tab"));
     });
     function syncModeChip() {
-      var k = getKey();
-      modeChip.textContent = k ? "Claude 연결됨" : "로컬 모드 — 수록작 검색";
+      var k = getKey(), pv = P();
+      modeChip.textContent = k ? pv.chip : "로컬 모드 — 수록작 검색";
       var lookupBtn = tabs.querySelector('[data-tab="lookup"]');
       lookupBtn.disabled = false; // 포트폴리오: 키 없이도 수록작 검색으로 무대 연출 가능
-      lookupBtn.title = k ? "제목·시인으로 Claude 연출" : "수록작을 검색해 무대로 불러옵니다";
+      lookupBtn.title = k ? "제목·시인으로 " + pv.label + " 연출" : "수록작을 검색해 무대로 불러옵니다";
     }
 
     /* ---------- lookup: search bundled anthology poems (local, no API key needed) ---------- */
@@ -1988,18 +2077,10 @@
       }
     };
     function mkErr(msg, kind) { var e = new Error(msg); e.kind = kind; return e; }
-    function callClaude(userMsg) {
-      return fetch(API_URL, {
-        method: "POST", headers: hdrs(getKey()),
-        body: JSON.stringify({
-          model: API_MODEL, max_tokens: 8000,
-          thinking: { type: "adaptive" },
-          output_config: { format: { type: "json_schema", schema: STAGING_SCHEMA } },
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content: userMsg }]
-        })
-      }).then(function (resp) {
-        if (resp.status === 401) throw mkErr("API 키가 올바르지 않습니다 — 설정에서 키를 확인하세요.", "auth");
+    function callLLM(userMsg) {
+      var pv = P();
+      return pv.request(getKey(), userMsg).then(function (resp) {
+        if (resp.status === 401 || resp.status === 403) throw mkErr("API 키가 올바르지 않습니다 — 설정에서 키를 확인하세요.", "auth");
         if (resp.status === 429) {
           var ra = resp.headers.get("retry-after");
           throw mkErr("요청 한도 초과 — " + (ra ? ra + "초 후" : "잠시 후") + " 다시 시도하세요.", "rate");
@@ -2010,11 +2091,8 @@
         }, function () { throw mkErr("요청 실패 (HTTP " + resp.status + ")", "bad"); });
         return resp.json();
       }).then(function (j) {
-        if (j.stop_reason === "max_tokens") throw mkErr("응답이 잘렸습니다 — 다시 시도하세요.", "trunc");
-        if (j.stop_reason === "refusal") throw mkErr("모델이 이 요청을 거절했습니다.", "refusal");
-        var blk = (j.content || []).filter(function (b) { return b.type === "text"; })[0];
-        if (!blk) throw mkErr("빈 응답을 받았습니다.", "empty");
-        try { return JSON.parse(blk.text); }
+        var text = pv.text(j);
+        try { return JSON.parse(text); }
         catch (e) { throw mkErr("응답 해석에 실패했습니다.", "parse"); }
       });
     }
@@ -2100,7 +2178,7 @@
       var prevLabel = stageBtn.textContent;
       stageBtn.textContent = "연출 중…";
       stStatus.textContent = "Claude가 무대를 구상하고 있습니다…";
-      withRetry(function () { return callClaude(userMsg); }, 2)
+      withRetry(function () { return callLLM(userMsg); }, 2)
         .then(function (raw) {
           var v = validatePlan(raw, st.mode === "paste" ? text : null);
           if (v.error) { stStatus.textContent = v.error; return; }
@@ -2230,6 +2308,7 @@
 
     /* ---------- init ---------- */
     setMode("paste");
+    if (!getKey()) keyStatus.textContent = P().note;
     syncKeyUI();
     studioSec.setAttribute("data-ink", "light");
   })();
